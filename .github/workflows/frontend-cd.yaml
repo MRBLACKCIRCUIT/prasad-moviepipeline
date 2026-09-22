@@ -1,4 +1,4 @@
-name: Frontend CD
+name: Frontend Continuous Deployment
 
 on:
   push:
@@ -8,58 +8,68 @@ on:
       - 'starter/frontend/**'
   workflow_dispatch:
 
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
 jobs:
   lint:
+    name: Lint Frontend
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: starter/frontend
-
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup NodeJS
         uses: actions/setup-node@v4
         with:
           node-version: 18
+          cache: 'npm'
+          cache-dependency-path: starter/frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint
+      - name: Run lint
         run: npm run lint
 
   test:
+    name: Test Frontend
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: starter/frontend
-
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup NodeJS
         uses: actions/setup-node@v4
         with:
           node-version: 18
+          cache: 'npm'
+          cache-dependency-path: starter/frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Test
-        run: CI=true npm test
+      - name: Run tests
+        env:
+          CI: true
+        run: npm run test
 
   build:
+    name: Build and Push Frontend
     needs:
       - lint
       - test
-
     runs-on: ubuntu-latest
-
+    outputs:
+      registry: ${{ steps.login-ecr.outputs.registry }}
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -67,7 +77,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -78,22 +88,25 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: frontend
           IMAGE_TAG: ${{ github.sha }}
+          MOVIE_API_URL: ${{ secrets.REACT_APP_MOVIE_API_URL }}
         run: |
+          API_URL="${MOVIE_API_URL:-http://localhost:5000}"
           docker build \
-            --build-arg=REACT_APP_MOVIE_API_URL=http://aa79ceff3f2fc4f1ab7f6894075e6a1c-1584127872.us-east-1.elb.amazonaws.com \
+            --build-arg=REACT_APP_MOVIE_API_URL="$API_URL" \
             --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:latest \
             starter/frontend
 
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
   deploy:
+    name: Deploy Frontend
     needs:
       - build
-
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -101,13 +114,17 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig \
             --name cluster \
-            --region us-east-1
+            --region ${{ env.AWS_REGION }}
 
       - name: Install Kustomize
         run: |
@@ -118,7 +135,7 @@ jobs:
         working-directory: starter/frontend/k8s
         run: |
           kustomize edit set image \
-            frontend=011816549984.dkr.ecr.us-east-1.amazonaws.com/frontend:${{ github.sha }}
+            frontend=${{ steps.login-ecr.outputs.registry }}/frontend:${{ github.sha }}
 
       - name: Deploy frontend
         run: |

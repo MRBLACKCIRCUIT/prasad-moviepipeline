@@ -1,4 +1,4 @@
-name: Backend CD
+name: Backend Continuous Deployment
 
 on:
   push:
@@ -6,20 +6,20 @@ on:
       - main
     paths:
       - 'starter/backend/**'
-
   workflow_dispatch:
 
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+
 jobs:
-
   lint:
+    name: Lint Backend
     runs-on: ubuntu-latest
-
     defaults:
       run:
         working-directory: starter/backend
-
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -36,16 +36,14 @@ jobs:
       - name: Run lint
         run: pipenv run lint
 
-
   test:
+    name: Test Backend
     runs-on: ubuntu-latest
-
     defaults:
       run:
         working-directory: starter/backend
-
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -62,16 +60,16 @@ jobs:
       - name: Run tests
         run: pipenv run test
 
-
   build:
+    name: Build and Push Backend
     needs:
       - lint
       - test
-
     runs-on: ubuntu-latest
-
+    outputs:
+      registry: ${{ steps.login-ecr.outputs.registry }}
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -79,7 +77,7 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -93,19 +91,19 @@ jobs:
         run: |
           docker build \
             --tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            --tag $ECR_REGISTRY/$ECR_REPOSITORY:latest \
             starter/backend
 
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
   deploy:
+    name: Deploy Backend
     needs:
       - build
-
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
@@ -113,13 +111,17 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig \
             --name cluster \
-            --region us-east-1
+            --region ${{ env.AWS_REGION }}
 
       - name: Install Kustomize
         run: |
@@ -130,7 +132,7 @@ jobs:
         working-directory: starter/backend/k8s
         run: |
           kustomize edit set image \
-            backend=011816549984.dkr.ecr.us-east-1.amazonaws.com/backend:${{ github.sha }}
+            backend=${{ steps.login-ecr.outputs.registry }}/backend:${{ github.sha }}
 
       - name: Deploy backend
         run: |
